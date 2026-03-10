@@ -13,7 +13,8 @@
 #define eBrake 15
 #define direction 12
 #define weapon 22
-#define gear 1
+
+int gear = 1;
 
 TwoWire I2Cone = TwoWire(0);
 TwoWire I2Ctwo = TwoWire(1);
@@ -54,16 +55,12 @@ void processGamepad(ControllerPtr ctl) {
     right.setVoltage(constrain(ctl->throttle() * gear + ctl->axisX(), 0, 4095), false);
 
 
-    if (ctl->a()) {
-        digitalWrite(weapon, HIGH);
-    } else {
-        digitalWrite(weapon, LOW);
-    }
-
-    if (ctl->button_shoulder_l && gear < 4) {
+    if (ctl->buttons() == 0x0020 && gear < 3) {
         gear++;
-    } else if (ctl->button_shoulder_r && gear > 1) {
+        delay(200); // Debounce delay
+    } else if (ctl->buttons() == 0x0010 && gear > 1) {
         gear--;
+        delay(200); // Debounce delay
     }
     
 
