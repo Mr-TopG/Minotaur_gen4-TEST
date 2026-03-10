@@ -1,5 +1,27 @@
 #include <Arduino.h>
 #include <Bluepad32.h>
+#include <Wire.h>
+#include <SPI.h> 
+#include <Adafruit_MCP4725.h>
+
+
+#define SDA_1 27    //pins for controlling left motor
+#define SCL_1 26
+
+#define SDA_2 33    //pins for controlling right motor
+#define SCL_2 32
+
+#define eBrake 15
+#define direction 35
+
+#define weapon 22
+
+TwoWire I2Cone = TwoWire(0);
+TwoWire I2Ctwo = TwoWire(1);
+
+Adafruit_MCP4725 right;       //initialize mcp4725 responsible for speed
+Adafruit_MCP4725 left;   //initialize mcp4725 responsible for directons/steer
+
 
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
@@ -153,6 +175,19 @@ void setup() {
     // - Second one, which is a "virtual device", is a mouse.
     // By default, it is disabled.
     BP32.enableVirtualDevice(false);
+
+      
+  pinMode(eBrake, OUTPUT);
+  pinMode(direction, OUTPUT);
+
+  I2Cone.begin(SDA_1, SCL_1, 100000); 
+  I2Ctwo.begin(SDA_2, SCL_2, 100000);
+
+  bool status = left.begin(0x60, &I2Cone);
+  bool status1 = right.begin(0x61, &I2Ctwo);
+
+  right.setVoltage(0, false);
+  left.setVoltage(0, false);
 }
 
 // Arduino loop function. Runs in CPU 1.
