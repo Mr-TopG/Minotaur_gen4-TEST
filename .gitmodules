@@ -1,3 +1,0 @@
-[submodule "Minotaur/Minotaur/lib/Adafruit_BusIO"]
-	path = Minotaur/Minotaur/lib/Adafruit_BusIO
-	url = https://github.com/adafruit/Adafruit_BusIO
