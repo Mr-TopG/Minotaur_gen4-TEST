@@ -4,14 +4,12 @@
 #include <SPI.h>
 #include <Adafruit_MCP4725.h>
 
-#define SDA_1 26
-#define SCL_1 27
-
-#define SDA_2 33
-#define SCL_2 32
+#define SDA_1 33
+#define SCL_1 32
 
 #define eBrake 15
-#define direction 12
+#define directionR 4
+#define directionL 16
 #define weapon 22
 
 int gear = 1;
@@ -23,6 +21,32 @@ Adafruit_MCP4725 right;
 Adafruit_MCP4725 left;
 
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+
+constexpr int kSteerAxisMin = -512;
+constexpr int kSteerAxisMax = 512;
+constexpr int kSteerDeadzone = 24;
+
+int processSteeringInput(int rawSteer) {
+    // Light filtering smooths jitter from noisy analog sticks.
+    static int filteredSteer = 0;
+    filteredSteer = (filteredSteer * 3 + rawSteer) / 4;
+
+    int centered = constrain(filteredSteer, kSteerAxisMin, kSteerAxisMax);
+
+    if (abs(centered) <= kSteerDeadzone) {
+        return 0;
+    }
+
+    if (centered > 0) {
+        centered -= kSteerDeadzone;
+    } else {
+        centered += kSteerDeadzone;
+    }
+
+    // Cubic response keeps fine control near center and stronger turn at edges.
+    const long cubic = (long)centered * centered * centered;
+    return (int)(cubic / (kSteerAxisMax * kSteerAxisMax));
+}
 
 // ================= Controller callbacks =================
 
@@ -50,9 +74,30 @@ void onDisconnectedController(ControllerPtr ctl) {
 // ================= Gamepad processing =================
 
 void processGamepad(ControllerPtr ctl) {
-    
-    left.setVoltage(constrain(ctl->throttle() * gear - ctl->axisX(), 0, 4095), false);
-    right.setVoltage(constrain(ctl->throttle() * gear + ctl->axisX(), 0, 4095), false);
+    const int throttleValue = ctl->throttle();
+    const int brakeValue = ctl->brake();
+    const int steerValue = processSteeringInput(ctl->axisX());
+
+    int driveValue = 0;
+
+    // Throttle has priority if both throttle and brake are pressed.
+    if (throttleValue > 0) {
+        digitalWrite(directionL, LOW);
+        digitalWrite(directionR, HIGH);
+        driveValue = throttleValue;
+    } else if (brakeValue > 0) {
+        digitalWrite(directionL, HIGH);
+        digitalWrite(directionR, LOW);
+        driveValue = brakeValue;
+    } else {
+        driveValue = 0;
+    }
+
+    const int baseDrive = driveValue * gear;
+    const int turnDelta = (steerValue * baseDrive) / 512;
+
+    left.setVoltage(constrain(baseDrive - turnDelta, 0, 4095), false);
+    right.setVoltage(constrain(baseDrive + turnDelta, 0, 4095), false);
 
 
     if (ctl->buttons() == 0x0020 && gear < 3) {
@@ -112,14 +157,15 @@ BP32.forgetBluetoothKeys();
 BP32.enableVirtualDevice(false);
 
 pinMode(eBrake, OUTPUT);
-pinMode(direction, OUTPUT);
+pinMode(directionL, OUTPUT);
+pinMode(directionR, OUTPUT);
 pinMode(weapon, OUTPUT);
 
 I2Cone.begin(SDA_1, SCL_1, 100000);
-I2Ctwo.begin(SDA_2, SCL_2, 100000);
+//I2Ctwo.begin(SDA_2, SCL_2, 100000);
 
 bool status = left.begin(0x60, &I2Cone);
-bool status1 = right.begin(0x61, &I2Ctwo);
+bool status1 = right.begin(0x61, &I2Cone);
 
 if (!status) Serial.println("Left DAC not found!");
 if (!status1) Serial.println("Right DAC not found!");
