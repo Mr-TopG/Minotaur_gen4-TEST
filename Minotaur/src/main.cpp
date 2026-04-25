@@ -25,13 +25,49 @@ ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 constexpr int kSteerAxisMin = -512;
 constexpr int kSteerAxisMax = 512;
 constexpr int kSteerDeadzone = 24;
+constexpr int kSteerScale = 512;
 
-int processSteeringInput(int rawSteer) {
+constexpr uint16_t kButtonEBrake = 0x0004;
+constexpr uint16_t kButtonGearUp = 0x0020;
+constexpr uint16_t kButtonGearDown = 0x0010;
+constexpr int kGearMin = 1;
+constexpr int kGearMax = 3;
+constexpr unsigned long kGearDebounceMs = 200;
+
+void setEBrakeGround(bool active) {
+    static bool lastActive = false;
+    if (active == lastActive) {
+        return;
+    }
+    lastActive = active;
+
+    // Open-drain mode: LOW grounds the line, HIGH releases it (floating).
+    digitalWrite(eBrake, active ? LOW : HIGH);
+}
+
+void setDirectionGround(bool leftActive, bool rightActive) {
+    static bool lastLeftActive = false;
+    static bool lastRightActive = false;
+    if (leftActive == lastLeftActive && rightActive == lastRightActive) {
+        return;
+    }
+    lastLeftActive = leftActive;
+    lastRightActive = rightActive;
+
+    // Open-drain mode: LOW grounds the line, HIGH releases it (floating).
+    digitalWrite(directionL, leftActive ? LOW : HIGH);
+    digitalWrite(directionR, rightActive ? LOW : HIGH);
+}
+
+int processSteeringInput(int rawSteer, int controllerIndex) {
+    // Keep a separate filter state per controller to avoid cross-controller mixing.
+    static int filteredSteer[BP32_MAX_GAMEPADS] = {0};
+    const int idx = constrain(controllerIndex, 0, BP32_MAX_GAMEPADS - 1);
+
     // Light filtering smooths jitter from noisy analog sticks.
-    static int filteredSteer = 0;
-    filteredSteer = (filteredSteer * 3 + rawSteer) / 4;
+    filteredSteer[idx] = (filteredSteer[idx] * 3 + rawSteer) / 4;
 
-    int centered = constrain(filteredSteer, kSteerAxisMin, kSteerAxisMax);
+    int centered = constrain(filteredSteer[idx], kSteerAxisMin, kSteerAxisMax);
 
     if (abs(centered) <= kSteerDeadzone) {
         return 0;
@@ -46,6 +82,29 @@ int processSteeringInput(int rawSteer) {
     // Cubic response keeps fine control near center and stronger turn at edges.
     const long cubic = (long)centered * centered * centered;
     return (int)(cubic / (kSteerAxisMax * kSteerAxisMax));
+}
+
+void updateGear(uint16_t buttons, int controllerIndex) {
+    static unsigned long lastChangeMs[BP32_MAX_GAMEPADS] = {0};
+    static bool lastUpPressed[BP32_MAX_GAMEPADS] = {false};
+    static bool lastDownPressed[BP32_MAX_GAMEPADS] = {false};
+
+    const int idx = constrain(controllerIndex, 0, BP32_MAX_GAMEPADS - 1);
+    const bool upPressed = (buttons & kButtonGearUp) != 0;
+    const bool downPressed = (buttons & kButtonGearDown) != 0;
+    const unsigned long nowMs = millis();
+    const bool debounceElapsed = (nowMs - lastChangeMs[idx]) >= kGearDebounceMs;
+
+    if (upPressed && !lastUpPressed[idx] && debounceElapsed && gear < kGearMax) {
+        gear++;
+        lastChangeMs[idx] = nowMs;
+    } else if (downPressed && !lastDownPressed[idx] && debounceElapsed && gear > kGearMin) {
+        gear--;
+        lastChangeMs[idx] = nowMs;
+    }
+
+    lastUpPressed[idx] = upPressed;
+    lastDownPressed[idx] = downPressed;
 }
 
 // ================= Controller callbacks =================
@@ -74,39 +133,39 @@ void onDisconnectedController(ControllerPtr ctl) {
 // ================= Gamepad processing =================
 
 void processGamepad(ControllerPtr ctl) {
+    const uint16_t buttons = ctl->buttons();
     const int throttleValue = ctl->throttle();
     const int brakeValue = ctl->brake();
-    const int steerValue = processSteeringInput(ctl->axisX());
+    const int steerValue = processSteeringInput(ctl->axisX(), ctl->index());
+    const bool eBrakePressed = (buttons == kButtonEBrake);
+
+    setEBrakeGround(eBrakePressed);
 
     int driveValue = 0;
 
     // Throttle has priority if both throttle and brake are pressed.
     if (throttleValue > 0) {
-        digitalWrite(directionL, LOW);
-        digitalWrite(directionR, HIGH);
+        // Forward: left direction pin grounded, right direction pin disconnected.
+        setDirectionGround(true, false);
         driveValue = throttleValue;
     } else if (brakeValue > 0) {
-        digitalWrite(directionL, HIGH);
-        digitalWrite(directionR, LOW);
+        // Reverse: right direction pin grounded, left direction pin disconnected.
+        setDirectionGround(false, true);
         driveValue = brakeValue;
     } else {
+        // No direction selected: disconnect both pins.
+        setDirectionGround(false, false);
         driveValue = 0;
     }
 
     const int baseDrive = driveValue * gear;
-    const int turnDelta = (steerValue * baseDrive) / 512;
+    const int turnDelta = (steerValue * baseDrive) / kSteerScale;
 
     left.setVoltage(constrain(baseDrive - turnDelta, 0, 4095), false);
     right.setVoltage(constrain(baseDrive + turnDelta, 0, 4095), false);
 
 
-    if (ctl->buttons() == 0x0020 && gear < 3) {
-        gear++;
-        delay(200); // Debounce delay
-    } else if (ctl->buttons() == 0x0010 && gear > 1) {
-        gear--;
-        delay(200); // Debounce delay
-    }
+    updateGear(buttons, ctl->index());
     
 
 
@@ -156,10 +215,13 @@ BP32.setup(&onConnectedController, &onDisconnectedController);
 BP32.forgetBluetoothKeys();
 BP32.enableVirtualDevice(false);
 
-pinMode(eBrake, OUTPUT);
-pinMode(directionL, OUTPUT);
-pinMode(directionR, OUTPUT);
+pinMode(eBrake, OUTPUT_OPEN_DRAIN);
+pinMode(directionL, OUTPUT_OPEN_DRAIN);
+pinMode(directionR, OUTPUT_OPEN_DRAIN);
 pinMode(weapon, OUTPUT);
+
+setEBrakeGround(false);
+setDirectionGround(false, false);
 
 I2Cone.begin(SDA_1, SCL_1, 100000);
 //I2Ctwo.begin(SDA_2, SCL_2, 100000);
