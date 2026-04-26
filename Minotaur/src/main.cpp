@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Bluepad32.h>
+#include <bt/uni_bt_allowlist.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_MCP4725.h>
@@ -20,6 +21,16 @@ TwoWire I2Ctwo = TwoWire(1);
 Adafruit_MCP4725 right;
 Adafruit_MCP4725 left;
 
+struct AllowedControllerMac {
+    bd_addr_t address;
+    bool enabled;
+};
+
+// Replace the MAC address below with the controller(s) you want to allow.
+static const AllowedControllerMac kAllowedControllerMacs[] = {
+    {{0xE4, 0x17, 0xD8, 0x34, 0xA2, 0x10}, true},
+};
+
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
 constexpr int kSteerAxisMin = -512;
@@ -34,6 +45,29 @@ constexpr int kGearMin = 1;
 constexpr int kGearMax = 3;
 constexpr unsigned long kGearDebounceMs = 200;
 
+void configureControllerMacWhitelist() {
+    bool hasEnabledEntries = false;
+
+    uni_bt_allowlist_remove_all();
+
+    for (const auto& entry : kAllowedControllerMacs) {
+        if (!entry.enabled) {
+            continue;
+        }
+
+        bd_addr_t address;
+        memcpy(address, entry.address, sizeof(address));
+        uni_bt_allowlist_add_addr(address);
+        hasEnabledEntries = true;
+    }
+
+    uni_bt_allowlist_set_enabled(hasEnabledEntries);
+
+    if (!hasEnabledEntries) {
+        Serial.println("Bluetooth allowlist is configured, but no MAC addresses are enabled yet.");
+    }
+}
+
 void setEBrakeGround(bool active) {
     static bool lastActive = false;
     if (active == lastActive) {
@@ -41,22 +75,19 @@ void setEBrakeGround(bool active) {
     }
     lastActive = active;
 
-    // Open-drain mode: LOW grounds the line, HIGH releases it (floating).
+    // Standard output mode: actively drive LOW/HIGH.
     digitalWrite(eBrake, active ? LOW : HIGH);
 }
 
-void setDirectionGround(bool leftActive, bool rightActive) {
-    static bool lastLeftActive = false;
-    static bool lastRightActive = false;
-    if (leftActive == lastLeftActive && rightActive == lastRightActive) {
+void setDriveDirection(bool reverse) {
+    static bool lastReverse = false;
+    if (reverse == lastReverse) {
         return;
     }
-    lastLeftActive = leftActive;
-    lastRightActive = rightActive;
+    lastReverse = reverse;
 
-    // Open-drain mode: LOW grounds the line, HIGH releases it (floating).
-    digitalWrite(directionL, leftActive ? LOW : HIGH);
-    digitalWrite(directionR, rightActive ? LOW : HIGH);
+    digitalWrite(directionL, reverse ? HIGH : LOW);
+    digitalWrite(directionR, reverse ? LOW : HIGH);
 }
 
 int processSteeringInput(int rawSteer, int controllerIndex) {
@@ -137,32 +168,31 @@ void processGamepad(ControllerPtr ctl) {
     const int throttleValue = ctl->throttle();
     const int brakeValue = ctl->brake();
     const int steerValue = processSteeringInput(ctl->axisX(), ctl->index());
-    const bool eBrakePressed = (buttons == kButtonEBrake);
+    const bool bothThrottleAndBrake = (throttleValue > 0) && (brakeValue > 0);
+    const bool eBrakePressed = ((buttons & kButtonEBrake) != 0) || bothThrottleAndBrake;
 
     setEBrakeGround(eBrakePressed);
 
-    int driveValue = 0;
-
-    // Throttle has priority if both throttle and brake are pressed.
-    if (throttleValue > 0) {
-        // Forward: left direction pin grounded, right direction pin disconnected.
-        setDirectionGround(true, false);
-        driveValue = throttleValue;
-    } else if (brakeValue > 0) {
-        // Reverse: right direction pin grounded, left direction pin disconnected.
-        setDirectionGround(false, true);
-        driveValue = brakeValue;
+    if (bothThrottleAndBrake) {
+        left.setVoltage(0, false);
+        right.setVoltage(0, false);
     } else {
-        // No direction selected: disconnect both pins.
-        setDirectionGround(false, false);
-        driveValue = 0;
+        const bool reverse = (brakeValue > 0) && (throttleValue == 0);
+        const int driveValue = (throttleValue > 0) ? throttleValue : brakeValue;
+
+        if (driveValue > 0) {
+        setDriveDirection(reverse);
+
+        const int baseDrive = driveValue * gear;
+        const int turnDelta = (-steerValue * baseDrive) / kSteerScale;
+
+        left.setVoltage(constrain(baseDrive - turnDelta, 0, 4095), false);
+        right.setVoltage(constrain(baseDrive + turnDelta, 0, 4095), false);
+        } else {
+        left.setVoltage(0, false);
+        right.setVoltage(0, false);
+        }
     }
-
-    const int baseDrive = driveValue * gear;
-    const int turnDelta = (steerValue * baseDrive) / kSteerScale;
-
-    left.setVoltage(constrain(baseDrive - turnDelta, 0, 4095), false);
-    right.setVoltage(constrain(baseDrive + turnDelta, 0, 4095), false);
 
 
     updateGear(buttons, ctl->index());
@@ -212,19 +242,21 @@ void setup() {
 Serial.begin(115200);
 
 BP32.setup(&onConnectedController, &onDisconnectedController);
+configureControllerMacWhitelist();
 BP32.forgetBluetoothKeys();
 BP32.enableVirtualDevice(false);
 
-pinMode(eBrake, OUTPUT_OPEN_DRAIN);
-pinMode(directionL, OUTPUT_OPEN_DRAIN);
-pinMode(directionR, OUTPUT_OPEN_DRAIN);
+pinMode(eBrake, OUTPUT);
+pinMode(directionL, OUTPUT);
+pinMode(directionR, OUTPUT);
 pinMode(weapon, OUTPUT);
+digitalWrite(directionL, HIGH);
+digitalWrite(directionR, LOW);
 
 setEBrakeGround(false);
-setDirectionGround(false, false);
+setDriveDirection(false);
 
 I2Cone.begin(SDA_1, SCL_1, 100000);
-//I2Ctwo.begin(SDA_2, SCL_2, 100000);
 
 bool status = left.begin(0x60, &I2Cone);
 bool status1 = right.begin(0x61, &I2Cone);
